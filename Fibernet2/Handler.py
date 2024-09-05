@@ -55,7 +55,7 @@ class Handler(object):
         log_keys = ['loss', 'loss_data','loss_pde', "loss_regu"]
         log_funs = [self.model.loss, self.model.loss_data, self.model.loss_pde, self.model.loss_regu]#, model.loss_pde, model.loss_data]
         args = (io_keys, log_keys, log_funs)
-        self.model.logger(logger, *args, io_step = 10)
+        self.model.logger(logger, *args, io_step = 100)
 
     def train(self, epochs=1000):
         self.model.train(self.model.dataset, nIter = epochs , ntk_weights = False)
@@ -65,19 +65,17 @@ class Handler(object):
         params = self.model.get_params(self.model.opt_state)
         if type_model=="original":
             AT_S = []  #Predicted at sampled points
-            for i in range(self.dataset.X_e.shape[-1]):
-                AT_S.append(self.model.AT_NN(params, self.dataset.X_e[:,:,i])[:,i][:,None]*self.model.Tmax[i])
-            AT_S = jnp.hstack(AT_S)
+            for i in range(len(self.dataset.X_e)):
+                AT_S.append(self.model.AT_NN(params, self.dataset.X_e[i])[...,i]*self.model.Tmax[i])
             AT_F = self.model.AT_NN(params ,self.dataset.X)*self.model.Tmax 
         if type_model=="delta":
             AT_S = [] #Predicted at sampled points
-            for i in range(self.dataset.F_e.shape[-1]):
-                AT_S.append(self.model.AT_NN(params, self.dataset.F_e[:,:,i])[:,i][:,None]*self.model.Tmax[i]) 
-            AT_S = jnp.hstack(AT_S)
+            for i in range(len(self.dataset.F_e)):
+                AT_S.append(self.model.AT_NN(params, self.dataset.F_e[i])[...,i]*self.model.Tmax[i]) 
             AT_F = self.model.AT_NN(params, self.dataset.F)*self.model.Tmax
-        AT_T = self.dataset.T_e*self.model.Tmax 
+        AT_T = [self.model.Tmax[i]*e for i,e in enumerate(self.dataset.T_e)]
         if return_times:
-            return AT_S, AT_F, AT_T
+            return AT_S, AT_F, AT_T 
         else:
             return AT_S, AT_F
     

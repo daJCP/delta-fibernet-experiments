@@ -133,7 +133,7 @@ class FiberNet(jxPINN):
         phi_square = []
         for i in range(self.p_NN):
             input = X_e[i]
-            phi_pred =  self.AT_NN(net_params, self.prior_params, input)[...,i]
+            phi_pred =  self.AT_NN(net_params, input)[...,i]
             phi_square.append(jnp.mean((phi_e[i]-phi_pred)**2))
     
         loss = jnp.mean(jnp.array(phi_square))
@@ -142,7 +142,7 @@ class FiberNet(jxPINN):
     # Loss of regularization
     @partial(jx.jit, static_argnums=(0,))
     def loss_regu(self, net_params, batch, *args):
-        X, Y = batch
+        X, _ = batch
         _, Xs = X
         eV_x, aV_x = self.GRAD_CVT(net_params, Xs)
         # Huber Regularization
@@ -320,8 +320,8 @@ class DeltaFiberNet(FiberNet):
     @partial(jx.jit, static_argnums=(0,))
     def loss_pde(self, net_params, batch, *args):
         X, Y = batch
-        _, Xc, Xs, operator, _ = X
-        _, P_p, _ = Y
+        _, Xc, Xs, operator = X
+        _, P_p = Y
 
         eik_loss = self.operator_net(net_params, Xc, Xs, P_p, operator)
 
