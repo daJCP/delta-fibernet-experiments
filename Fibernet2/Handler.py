@@ -101,18 +101,21 @@ class Handler(object):
 
         _batchs = len(eig_centro)
         D_cen_3D = []
+        D_cv = []
+
         Nbat = 20
         for i in tqdm(range(Nbat)):
             st, ed = int(_batchs*i/Nbat), int(_batchs*(i+1)/Nbat)
             #print(st, ed)
             outs = self.model.predict(eig_centro[st:ed],centroids[st:ed])
             D_cen_3D.append(outs[4])
+            D_cv.append(outs[1])
+        D_cv = jnp.concatenate(D_cv, axis=1)
         D_cen_3D = jnp.vstack(D_cen_3D) # Model values at centroids
         predicted_vals_3D, predicted_vecs_3D = jnp.linalg.eigh(D_cen_3D)
 
-        return predicted_vals_3D, predicted_vecs_3D
+        return predicted_vals_3D, predicted_vecs_3D, D_cv
     
-
 
 class HandlerRPN(Handler):
     def __init__(self, hiperparams, gen):
@@ -206,6 +209,7 @@ class HandlerRPN(Handler):
         _batchs = len(eig_centro)
         predicted_vals_3D = []
         predicted_vecs_3D = []
+        D_cv = []
         Nbat = 100
         for i in tqdm(range(Nbat)):
             st, ed = int(_batchs*i/Nbat), int(_batchs*(i+1)/Nbat)
@@ -213,10 +217,12 @@ class HandlerRPN(Handler):
             vals_3D, vecs_3D = jx.vmap(jnp.linalg.eigh, (0))(outs[4])
             predicted_vals_3D.append(vals_3D)
             predicted_vecs_3D.append(vecs_3D)
+            D_cv.append(outs[1])
         predicted_vals_3D = jnp.concatenate(predicted_vals_3D, axis=1) # Model values at centroids
         predicted_vecs_3D = jnp.concatenate(predicted_vecs_3D, axis=1) # Model values at centroids
-        
-        return predicted_vals_3D, predicted_vecs_3D
+        D_cv = jnp.concatenate(D_cv, axis=1)
+
+        return predicted_vals_3D, predicted_vecs_3D, D_cv
     
     def aggragateAngles(self, method="Medoid"):
         methods = {
@@ -282,7 +288,7 @@ class HandlerRPN(Handler):
         return predicted_vecs_3D_m[...,2]
     
     def _MedoidAgg(self):
-        vals, vecs = self.predictAngles()
+        _, vecs, _ = self.predictAngles()
         pred_fibers = vecs[...,2]
         pred_fibers = jnp.moveaxis(pred_fibers, 0, 1)
         simila0 = lambda v: jnp.array([(1-jnp.abs(v@v[i])) for i in range(len(v))])
