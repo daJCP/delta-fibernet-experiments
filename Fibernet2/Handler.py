@@ -1,5 +1,6 @@
 import jax as jx
 import jax.numpy as jnp
+import numpy as np
 from tqdm import tqdm
 
 import jaxpinns.architectures  as jxp_ar
@@ -221,8 +222,16 @@ class HandlerRPN(Handler):
         predicted_vals_3D = jnp.concatenate(predicted_vals_3D, axis=1) # Model values at centroids
         predicted_vecs_3D = jnp.concatenate(predicted_vecs_3D, axis=1) # Model values at centroids
         D_cv = jnp.concatenate(D_cv, axis=1)
+        # set angle as the one corresponding with the greater velocity
+        D_cv_c = np.array(D_cv).copy()
+        D_cv_c[D_cv[...,0]>D_cv[...,1], 0] = D_cv[D_cv[...,0]>D_cv[...,1],0]
+        D_cv_c[D_cv[...,0]<D_cv[...,1], 0] = D_cv[D_cv[...,0]<D_cv[...,1],1]
+        D_cv_c[D_cv[...,0]>D_cv[...,1], 1] = D_cv[D_cv[...,0]>D_cv[...,1],1]
+        D_cv_c[D_cv[...,0]<D_cv[...,1], 1] = D_cv[D_cv[...,0]<D_cv[...,1],0]
+        D_cv_c[D_cv[...,0]>D_cv[...,1], 2] = D_cv[D_cv[...,0]>D_cv[...,1],2]
+        D_cv_c[D_cv[...,0]<D_cv[...,1], 2] = np.sin(np.arccos(np.clip(D_cv[D_cv[...,0]<D_cv[...,1],2], -1,1)))
 
-        return predicted_vals_3D, predicted_vecs_3D, D_cv
+        return predicted_vals_3D, predicted_vecs_3D, D_cv_c
     
     def aggragateAngles(self, method="Medoid"):
         methods = {
@@ -258,9 +267,18 @@ class HandlerRPN(Handler):
             D_cv.append(outs[1])
         D_cen_3D = jnp.concatenate(D_cen_3D, axis=1) # Model values at centroids
         D_cv = jnp.concatenate(D_cv, axis=1) # Model values at centroids
-        theta = jnp.arccos(jnp.clip(D_cv[...,2], -1, 1))
+        # set angle as the one corresponding with the greater velocity
+        D_cv_c = np.array(D_cv).copy()
+        D_cv_c[D_cv[...,0]>D_cv[...,1], 0] = D_cv[D_cv[...,0]>D_cv[...,1],0]
+        D_cv_c[D_cv[...,0]<D_cv[...,1], 0] = D_cv[D_cv[...,0]<D_cv[...,1],1]
+        D_cv_c[D_cv[...,0]>D_cv[...,1], 1] = D_cv[D_cv[...,0]>D_cv[...,1],1]
+        D_cv_c[D_cv[...,0]<D_cv[...,1], 1] = D_cv[D_cv[...,0]<D_cv[...,1],0]
+        D_cv_c[D_cv[...,0]>D_cv[...,1], 2] = D_cv[D_cv[...,0]>D_cv[...,1],2]
+        D_cv_c[D_cv[...,0]<D_cv[...,1], 2] = np.sin(np.arccos(np.clip(D_cv[D_cv[...,0]<D_cv[...,1],2], -1,1)))
+
+        theta = jnp.arccos(jnp.clip(D_cv_c[...,2], -1, 1))
         
-        logT = jx.vmap(jx.vmap(Tensor, (0,0,0)), (0,0,0))(theta, jnp.log(D_cv[...,:1]), jnp.log(D_cv[...,1:2]))
+        logT = jx.vmap(jx.vmap(Tensor, (0,0,0)), (0,0,0))(theta, jnp.log(D_cv_c[...,:1]), jnp.log(D_cv_c[...,1:2]))
 
         L = logT.mean(0)
         eL = jx.vmap(jx.scipy.linalg.expm)(L)
