@@ -4,6 +4,7 @@ Implementation of the paper **Ensemble learning of the atrial fiber orientation 
 
 Δ-Fibernet introduces an ensemble learning approach to estimate atrial fiber orientation from activation maps, offering enhanced accuracy, uncertainty quantification, and reduced training time compared to traditional PINNs.
 
+![Schematic Figure](figure/diagram.png)
 ---
 
 ## Installation
