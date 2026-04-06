@@ -12,7 +12,7 @@ Implementation of the paper **Ensemble learning of the atrial fiber orientation 
 First, clone the repository:
 
 ```bash
-git clone https://github.com/your-username/delta-fibernet.git
+git clone https://github.com/HiddenHeartLab/Delta-fibernet.git
 cd delta-fibernet
 ```
 
