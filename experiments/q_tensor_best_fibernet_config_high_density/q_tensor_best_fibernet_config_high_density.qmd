@@ -1,0 +1,108 @@
+---
+title: "Q Tensor Best Config High Density"
+format:
+  pdf:
+    toc: false
+    number-sections: false
+    geometry:
+      - margin=2cm
+  html:
+    toc: false
+    number-sections: false
+    theme: cosmo
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+Este experimento replica `q_tensor_best_fibernet_config`, pero aumenta la densidad del generador de `16` a `24`. El experimento original y su PDF no se modifican.
+
+```text
+maps = 5
+density = 24
+n_iter = 30000
+batch_size = 32
+AT net = [20] * 7 + [1]
+CV net = [20] * 5 + [3]
+lambda_pde = 1e-4
+lambda_tve = 1e-5
+lambda_tva = 1e-9
+lambda_df = 1.0
+```
+
+## Objetivo
+
+Evaluar la misma comparacion `alpha`, `q_alpha` y `q_direct` con mayor densidad de puntos y visualizaciones 3D mas informativas:
+
+- mas flechas en el campo de fibras;
+- flechas mas pequenas para evitar saturacion;
+- vistas isometrica, frontal, lateral y superior;
+- mapas de error angular en multiples vistas.
+
+## Resultados
+
+Los resultados numericos se cargan desde:
+
+```text
+results/lambda1e-9_density24_best5/summary.json
+```
+
+## Comparacion Con Best Config Original
+
+| Experimento | density | Alpha mean | Q desde alpha mean | Q directo mean |
+|---|---:|---:|---:|---:|
+| Best config original | 16 | 24.95° | 25.04° | 25.65° |
+| High density | 24 | 24.30° | 24.38° | 27.21° |
+
+Con `density=24`, `alpha` y `q_alpha` quedan levemente bajo el error medio del best config original, mientras que `q_direct` empeora. El valor de `q_direct` reportado en la tabla corresponde al control en CPU, porque JAX Metal produjo un resultado inconsistente para ese modelo.
+
+## Control GPU/CPU
+
+Para aislar el efecto de la GPU, se repitio `density=16` con JAX Metal. `alpha` y `q_alpha` quedaron cerca del resultado original, pero `q_direct` subio artificialmente de `25.65°` a `31.21°`. Al repetir solo `q_direct` en CPU con `density=16`, el resultado vuelve exactamente a `25.65°`. Por lo tanto, `q_direct` no debe evaluarse con Metal en este entorno.
+
+| Control | Modelo | Error medio |
+|---|---|---:|
+| Original CPU, density 16 | q_direct | 25.65° |
+| GPU Metal, density 16 | q_direct | 31.21° |
+| CPU control, density 16 | q_direct | 25.65° |
+| GPU Metal, density 24 | q_direct | 28.35° |
+| CPU control, density 24 | q_direct | 27.21° |
+
+## Visualizaciones 3D
+
+### Campo de fibras: vista isometrica
+
+![Campo de fibras denso isometrico](figures/lambda1e-9_density24_best5/fiber_field_dense_isometric.png){width=100%}
+
+### Campo de fibras: vista frontal
+
+![Campo de fibras denso frontal](figures/lambda1e-9_density24_best5/fiber_field_dense_front.png){width=100%}
+
+### Campo de fibras: vista izquierda
+
+![Campo de fibras denso izquierda](figures/lambda1e-9_density24_best5/fiber_field_dense_left.png){width=100%}
+
+### Campo de fibras: vista superior
+
+![Campo de fibras denso superior](figures/lambda1e-9_density24_best5/fiber_field_dense_top.png){width=100%}
+
+## Mapas De Error Angular
+
+![Error angular isometrico](figures/lambda1e-9_density24_best5/angular_error_dense_isometric.png){width=100%}
+
+![Error angular frontal](figures/lambda1e-9_density24_best5/angular_error_dense_front.png){width=100%}
+
+## Graficos Resumen
+
+![Media y mediana de error angular](figures/lambda1e-9_density24_best5/angular_error_bars.png){width=80%}
+
+![Histograma de error angular](figures/lambda1e-9_density24_best5/angular_error_histogram.png){width=80%}
+
+## Archivos
+
+```text
+experiments/q_tensor_best_fibernet_config_high_density/configs/best_5_maps_lambda1e-9_density24.json
+experiments/q_tensor_best_fibernet_config_high_density/results/lambda1e-9_density24_best5/summary.json
+experiments/q_tensor_best_fibernet_config_high_density/figures/lambda1e-9_density24_best5/
+```
