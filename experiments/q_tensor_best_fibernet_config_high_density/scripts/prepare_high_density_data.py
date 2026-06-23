@@ -94,8 +94,10 @@ def save_high_density_data(cfg: dict, cache_path: Path) -> Path:
     print(f"Creating high-density synthetic data with density={cfg['density']}")
     generator_cfg = resolve_config_paths(cfg)
     gen = Generator(generator_cfg)
-    gen.params = cfg.copy()
     gen.sampling_TA(cfg)
+    saved_params = cfg.copy()
+    saved_params["area_multiplier"] = gen.params["area_multiplier"]
+    saved_params["maps"] = gen.params["maps"]
 
     np.savez_compressed(
         cache_path,
@@ -111,7 +113,7 @@ def save_high_density_data(cfg: dict, cache_path: Path) -> Path:
         operator=np.asarray(gen.operator),
         X_e=np.stack([np.asarray(x) for x in gen.X_e]),
         T_e=np.stack([np.asarray(t) for t in gen.T_e]),
-        params_json=np.asarray(json.dumps(gen.params, default=json_default)),
+        params_json=np.asarray(json.dumps(saved_params, default=json_default)),
     )
     print(f"Saved data cache to {cache_path}")
     return cache_path

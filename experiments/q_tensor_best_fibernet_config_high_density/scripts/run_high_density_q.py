@@ -361,7 +361,10 @@ def main():
     else:
         print(f"Preparing shared synthetic data with density={args.density}")
         gen = Generator(resolve_config_paths(cfg))
-        gen.params = cfg.copy()
+        gen_params = cfg.copy()
+        gen_params["area_multiplier"] = gen.params["area_multiplier"]
+        gen_params["maps"] = gen.params["maps"]
+        gen.params = gen_params
     truth_fibers = np.asarray(gen.D)[:, :, -1]
 
     model_name = args.model
