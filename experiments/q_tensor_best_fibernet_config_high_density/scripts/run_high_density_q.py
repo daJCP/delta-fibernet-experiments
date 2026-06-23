@@ -1,7 +1,15 @@
 import argparse
 import json
+import os
 import sys
+import time
 from pathlib import Path
+
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+os.environ.setdefault("XLA_FLAGS", "--xla_gpu_deterministic_ops=true")
+os.environ.setdefault("PYVISTA_OFF_SCREEN", "true")
+os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "true")
+os.environ.setdefault("MESA_LOADER_DRIVER_OVERRIDE", "llvmpipe")
 
 import jax as jx
 import jax.numpy as jnp
@@ -21,6 +29,7 @@ from jaxpinns.loggers import logger
 
 from Fibernet2.FiberNet import FiberNet
 from Fibernet2.Generator import Generator
+from prepare_high_density_data import high_density_config, load_high_density_data, resolve_config_paths
 from q_fibernet import QAlphaFiberNet, QDirectFiberNet
 
 
@@ -29,42 +38,6 @@ MODELS = {
     "q_alpha": QAlphaFiberNet,
     "q_direct": QDirectFiberNet,
 }
-
-
-def high_density_config(n_iter: int, lambda_tva: float, density: int) -> dict:
-    return {
-        "geometry_file": str(ROOT / "example" / "LA_model.vtk"),
-        "create_TA_maps": True,
-        "maps_files": [],
-        "geometry_file_smooth": None,
-        "area_multiplier": None,
-        "maps": 5,
-        "density": density,
-        "noise_ms": 0,
-        "input_precalculated": None,
-        "N_eig_max": 200,
-        "n_eigs": 20,
-        "extend_n_layers": 3,
-        "ensemble_size": 10,
-        "layers": [20] * 7 + [1],
-        "CVlayers": [20] * 5 + [3],
-        "lambda_prior": 1e-2,
-        "scaled": True,
-        "CVmax": 3.0,
-        "batch_size": 32,
-        "lambda_pde": 1e-4,
-        "lambda_tve": 1e-5,
-        "lambda_tva": lambda_tva,
-        "lambda_df": 1.0,
-        "learning_rate": 1e-3,
-        "init_key": 0,
-        "seed": 456,
-        "gen_key_1": 1651,
-        "gen_key_2": 1011,
-        "type_model": "original",
-        "n_iter": n_iter,
-    }
-
 
 class ExperimentHandler:
     def __init__(self, model_cls, params, gen):
@@ -298,60 +271,133 @@ def strip_arrays(results):
     return {model: {k: v for k, v in metrics.items() if k not in skip} for model, metrics in results.items()}
 
 
+def slug_value(value):
+    return f"{value:g}".replace("-", "m").replace("+", "").replace(".", "p")
+
+
+def experiment_dir(args, cfg):
+    path = (
+        EXP_DIR
+        / "results"
+        / f"density{args.density}"
+        / f"lambda_tva{slug_value(args.lambda_tva)}"
+        / f"lr{slug_value(args.learning_rate)}"
+        / f"niter{args.n_iter}"
+        / f"batch{cfg['batch_size']}"
+    )
+    if args.run_label:
+        safe_label = args.run_label.replace("/", "_").replace(" ", "_")
+        path = path / safe_label
+    return path
+
+
+def metrics_without_arrays(metrics):
+    skip = {"pred_fibers", "truth_fibers", "angular_errors", "loss", "loss_data", "loss_pde", "loss_regu_orient"}
+    return {k: v for k, v in metrics.items() if k not in skip}
+
+
+def load_model_result(model_dir):
+    metrics_path = model_dir / "metrics.json"
+    reconstruction_path = model_dir / "reconstruction.npz"
+    if not metrics_path.exists() or not reconstruction_path.exists():
+        return None
+
+    with open(metrics_path) as f:
+        metrics = json.load(f)
+    arrays = np.load(reconstruction_path)
+    metrics["pred_fibers"] = arrays["pred_fibers"].tolist()
+    metrics["truth_fibers"] = arrays["truth_fibers"].tolist()
+    metrics["angular_errors"] = arrays["angular_errors"].tolist()
+    return metrics
+
+
+def load_available_results(out_dir):
+    results = {}
+    for model_name in MODELS:
+        metrics = load_model_result(out_dir / model_name)
+        if metrics is not None:
+            results[model_name] = metrics
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--n-iter", type=int, default=30000)
     parser.add_argument("--lambda-tva", type=float, default=1e-9)
+    parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--density", type=int, default=24)
     parser.add_argument("--max-arrows", type=int, default=2600)
-    parser.add_argument("--models", nargs="+", choices=MODELS.keys(), default=list(MODELS.keys()))
+    parser.add_argument("--data-cache", type=Path, default=None)
+    parser.add_argument("--render-figures", action="store_true")
+    parser.add_argument("--model", choices=MODELS.keys(), required=True)
     parser.add_argument("--run-label", default="")
     args = parser.parse_args()
 
-    lam_slug = "lambda1e-9" if args.lambda_tva == 1e-9 else f"lambda{args.lambda_tva:g}".replace(".", "p")
-    run_slug = f"{lam_slug}_density{args.density}_best5"
-    if args.run_label:
-        safe_label = args.run_label.replace("/", "_").replace(" ", "_")
-        run_slug = f"{run_slug}_{safe_label}"
-    out_dir = EXP_DIR / "results" / run_slug
+    out_dir = experiment_dir(args, high_density_config(args.n_iter, args.lambda_tva, args.density, args.learning_rate))
     out_dir.mkdir(parents=True, exist_ok=True)
     (EXP_DIR / "configs").mkdir(parents=True, exist_ok=True)
-    cfg = high_density_config(args.n_iter, args.lambda_tva, args.density)
-    cfg_name = f"best_5_maps_{lam_slug}_density{args.density}"
+    cfg = high_density_config(args.n_iter, args.lambda_tva, args.density, args.learning_rate)
+    cfg_name = (
+        f"best_5_maps_density{args.density}_"
+        f"lambda_tva{slug_value(args.lambda_tva)}_"
+        f"lr{slug_value(args.learning_rate)}_"
+        f"niter{args.n_iter}"
+    )
     if args.run_label:
+        safe_label = args.run_label.replace("/", "_").replace(" ", "_")
         cfg_name = f"{cfg_name}_{safe_label}"
     with open(EXP_DIR / "configs" / f"{cfg_name}.json", "w") as f:
         json.dump(cfg, f, indent=2)
+    with open(out_dir / "config.json", "w") as f:
+        json.dump(cfg, f, indent=2)
 
-    print(f"Preparing shared synthetic data with density={args.density}")
-    gen = Generator(cfg)
+    if args.data_cache:
+        print(f"Loading shared synthetic data from {args.data_cache}")
+        gen = load_high_density_data(args.data_cache)
+        if int(gen.params["density"]) != args.density:
+            raise ValueError(
+                f"Cache density {gen.params['density']} does not match requested density {args.density}"
+            )
+    else:
+        print(f"Preparing shared synthetic data with density={args.density}")
+        gen = Generator(resolve_config_paths(cfg))
+        gen.params = cfg.copy()
     truth_fibers = np.asarray(gen.D)[:, :, -1]
 
-    results = {}
-    for model_name in args.models:
-        model_cls = MODELS[model_name]
-        print(f"Training {model_name} with density={args.density}")
-        handler = ExperimentHandler(model_cls, cfg, gen)
-        handler.train(args.n_iter)
-        metrics = metrics_from_run(handler, truth_fibers)
-        results[model_name] = metrics
-        model_dir = out_dir / model_name
-        model_dir.mkdir(parents=True, exist_ok=True)
-        with open(model_dir / "metrics.json", "w") as f:
-            json.dump({k: v for k, v in metrics.items() if k not in {"pred_fibers", "truth_fibers", "angular_errors", "loss", "loss_data", "loss_pde", "loss_regu_orient"}}, f, indent=2)
-        np.savez_compressed(
-            model_dir / "reconstruction.npz",
-            pred_fibers=np.asarray(metrics["pred_fibers"]),
-            truth_fibers=np.asarray(metrics["truth_fibers"]),
-            angular_errors=np.asarray(metrics["angular_errors"]),
-        )
+    model_name = args.model
+    model_cls = MODELS[model_name]
+    print(f"Training {model_name} with density={args.density}")
+    handler = ExperimentHandler(model_cls, cfg, gen)
+    train_start = time.perf_counter()
+    handler.train(args.n_iter)
+    train_time_seconds = time.perf_counter() - train_start
+    metrics = metrics_from_run(handler, truth_fibers)
+    metrics["train_time_seconds"] = float(train_time_seconds)
+    metrics["train_time_minutes"] = float(train_time_seconds / 60.0)
+
+    model_dir = out_dir / model_name
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    with open(model_dir / "metrics.json", "w") as f:
+        json.dump(metrics_without_arrays(metrics), f, indent=2)
+    np.savez_compressed(
+        model_dir / "reconstruction.npz",
+        pred_fibers=np.asarray(metrics["pred_fibers"]),
+        truth_fibers=np.asarray(metrics["truth_fibers"]),
+        angular_errors=np.asarray(metrics["angular_errors"]),
+    )
+
+    results = load_available_results(out_dir)
+    results[model_name] = metrics
 
     with open(out_dir / "summary.json", "w") as f:
         json.dump(strip_arrays(results), f, indent=2)
-    if set(results) == set(MODELS):
-        render_figures(results, gen, EXP_DIR, run_slug, args.max_arrows)
+
+    if args.render_figures and set(results) == set(MODELS):
+        render_figures(results, gen, out_dir, "comparison", args.max_arrows)
     else:
-        print("Skipping combined figures until all models are available.")
+        print(">> Skipping figures. Use --render-figures to create them.")
+    print(f"Results saved to {out_dir}\n")
     print(json.dumps(strip_arrays(results), indent=2))
 
 
