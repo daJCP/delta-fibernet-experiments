@@ -193,7 +193,10 @@ class Generator():
         x_e = []
         t_e = []
         for i in range(maps):
-            m_ind = rng_agent.choice(self.points.shape[0],[ppm,],replace=False)
+            if info.get("nested_density_sampling", False):
+                m_ind = rng_agent.permutation(self.points.shape[0])[:ppm]
+            else:
+                m_ind = rng_agent.choice(self.points.shape[0],[ppm,],replace=False)
             phi = self.phis[:,i]
             m_mask = np.zeros(self.points.shape[0], dtype=bool)
             m_mask[m_ind] = True
@@ -305,4 +308,3 @@ class Generator():
             raise Exception(f"type_model:{type_model} not valid")
         
         return pack
-
