@@ -30,7 +30,7 @@ SWEEP_PRESETS = {
 }
 
 from prepare_high_density_data import EXP_DIR, default_cache_path
-from run_high_density_q import MODELS, experiment_dir, high_density_config
+from run_high_density_q import MODELS, experiment_dir, high_density_config, slug_value
 
 
 
@@ -79,23 +79,82 @@ def metrics_done(args, model_name):
 
 
 def checkpoint_done(args, model_name):
-    checkpoint_path = model_result_dir(args, model_name) / "checkpoints" / "latest.pkl"
+    checkpoint = best_checkpoint_candidate(args, model_name)
+    return checkpoint is not None and checkpoint["completed_iter"] >= int(args.n_iter)
+
+
+def checkpoint_iter(checkpoint_path):
+    checkpoint_path = checkpoint_path
     if not checkpoint_path.exists():
-        return False
+        return None
 
     try:
         with open(checkpoint_path, "rb") as f:
             payload = pickle.load(f)
     except Exception as exc:
         print(f">> Ignoring unreadable checkpoint {checkpoint_path}: {exc}")
-        return False
+        return None
 
-    return int(payload.get("completed_iter", 0)) >= int(args.n_iter)
+    return int(payload.get("completed_iter", 0))
+
+
+def compatible_checkpoint_candidates(args, model_name):
+    cfg = high_density_config(args.n_iter, args.lambda_tva, args.density, args.learning_rate)
+    root = (
+        EXP_DIR
+        / "results"
+        / f"density{args.density}"
+        / f"lambda_tva{slug_value(args.lambda_tva)}"
+        / f"lr{slug_value(args.learning_rate)}"
+    )
+    if not root.exists():
+        return []
+
+    candidates = []
+    safe_label = args.run_label.replace("/", "_").replace(" ", "_") if args.run_label else ""
+
+    for niter_dir in root.glob("niter*"):
+        if not niter_dir.is_dir():
+            continue
+        try:
+            n_iter = int(niter_dir.name.removeprefix("niter"))
+        except ValueError:
+            continue
+        if n_iter > args.n_iter:
+            continue
+
+        checkpoint_path = niter_dir / f"batch{cfg['batch_size']}"
+        if safe_label:
+            checkpoint_path = checkpoint_path / safe_label
+        checkpoint_path = checkpoint_path / model_name / "checkpoints" / "latest.pkl"
+        completed_iter = checkpoint_iter(checkpoint_path)
+        if completed_iter is None:
+            continue
+        if completed_iter > args.n_iter:
+            continue
+        candidates.append(
+            {
+                "path": checkpoint_path,
+                "completed_iter": completed_iter,
+                "partition_n_iter": n_iter,
+            }
+        )
+
+    return sorted(
+        candidates,
+        key=lambda item: (item["completed_iter"], item["partition_n_iter"]),
+        reverse=True,
+    )
+
+
+def best_checkpoint_candidate(args, model_name):
+    candidates = compatible_checkpoint_candidates(args, model_name)
+    return candidates[0] if candidates else None
 
 
 def partial_checkpoint_exists(args, model_name):
-    checkpoint_path = model_result_dir(args, model_name) / "checkpoints" / "latest.pkl"
-    return checkpoint_path.exists() and not checkpoint_done(args, model_name)
+    checkpoint = best_checkpoint_candidate(args, model_name)
+    return checkpoint is not None and checkpoint["completed_iter"] < int(args.n_iter)
 
 
 def prepare_cache(density, force=False):
