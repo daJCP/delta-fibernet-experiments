@@ -1,6 +1,8 @@
 import argparse
+import itertools
 import json
 import os
+import pickle
 import sys
 import time
 from pathlib import Path
@@ -39,10 +41,13 @@ MODELS = {
     "q_direct": QDirectFiberNet,
 }
 
+LOSS_KEYS = ("loss", "loss_data", "loss_pde", "loss_regu_orient", "loss_epoch")
+
 class ExperimentHandler:
-    def __init__(self, model_cls, params, gen):
+    def __init__(self, model_cls, params, gen, log_every=1):
         self.hiperparams = params.copy()
         self.dataset = gen.dataset(self.hiperparams)
+        self.log_every = max(1, int(log_every))
         init_key = jx.random.PRNGKey(self.hiperparams["init_key"])
         self.model = model_cls(
             dataset=self.dataset,
@@ -64,10 +69,64 @@ class ExperimentHandler:
         self.model.optimizer(jxp_op.adam, self.hiperparams["learning_rate"], self.model.loss)
         log_keys = ["loss", "loss_data", "loss_pde", "loss_regu"]
         log_funs = [self.model.loss, self.model.loss_data, self.model.loss_pde, self.model.loss_regu]
-        self.model.logger(logger, log_keys, log_keys, log_funs, io_step=100)
+        self.model.logger(logger, log_keys, log_keys, log_funs, io_step=self.log_every)
 
-    def train(self, epochs):
-        self.model.train(self.dataset, nIter=epochs, ntk_weights=False)
+    def checkpoint_payload(self, completed_iter):
+        return {
+            "completed_iter": int(completed_iter),
+            "opt_state": jx.device_get(self.model.opt_state),
+            "training_log": jx.device_get(self.model.training_log),
+            "log_every": self.log_every,
+        }
+
+    def save_checkpoint(self, checkpoint_dir, completed_iter):
+        checkpoint_dir = Path(checkpoint_dir)
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        payload = self.checkpoint_payload(completed_iter)
+        iter_path = checkpoint_dir / f"checkpoint_iter_{completed_iter}.pkl"
+        latest_path = checkpoint_dir / "latest.pkl"
+        with open(iter_path, "wb") as f:
+            pickle.dump(payload, f)
+        with open(latest_path, "wb") as f:
+            pickle.dump(payload, f)
+        return latest_path
+
+    def load_checkpoint(self, checkpoint_dir):
+        checkpoint_dir = Path(checkpoint_dir)
+        latest_path = checkpoint_dir / "latest.pkl"
+        if not latest_path.exists():
+            return None
+
+        with open(latest_path, "rb") as f:
+            payload = pickle.load(f)
+
+        completed_iter = int(payload.get("completed_iter", 0))
+        self.model.opt_state = jx.device_put(payload["opt_state"])
+        self.model.net_params = self.model.get_params(self.model.opt_state)
+        self.model.training_log = payload.get("training_log", self.model.training_log)
+        self.model.itercount = itertools.count(completed_iter)
+        return {"path": str(latest_path), "completed_iter": completed_iter}
+
+    def train(self, epochs, checkpoint_dir=None, checkpoint_every=1000, start_iter=0):
+        if epochs <= 0:
+            return int(start_iter)
+
+        checkpoint_every = int(checkpoint_every or 0)
+        completed_iter = int(start_iter)
+
+        if checkpoint_dir is None or checkpoint_every <= 0:
+            self.model.train(self.dataset, nIter=epochs, ntk_weights=False)
+            return completed_iter + int(epochs)
+
+        remaining = int(epochs)
+        while remaining > 0:
+            chunk = min(checkpoint_every, remaining)
+            self.model.train(self.dataset, nIter=chunk, ntk_weights=False)
+            completed_iter += chunk
+            remaining -= chunk
+            self.save_checkpoint(checkpoint_dir, completed_iter)
+
+        return completed_iter
 
     def predict_principal_fibers(self):
         triangs = self.dataset.triangs
@@ -127,6 +186,7 @@ def metrics_from_run(handler, truth_fibers):
         "final_loss_pde": to_float(logs["loss_pde"][-1]),
         "final_loss_regu_orient": to_float(reg_orient),
         "final_loss_regu_orient_weighted": to_float(handler.hiperparams["lambda_tva"] * reg_orient),
+        "loss_epoch": [1 + i * handler.log_every for i in range(len(logs["loss"]))],
         "loss": [to_float(v) for v in logs["loss"]],
         "loss_data": [to_float(v) for v in logs["loss_data"]],
         "loss_pde": [to_float(v) for v in logs["loss_pde"]],
@@ -166,42 +226,123 @@ def add_fiber_panel(plotter, mesh, centers, vectors, ids, title, color, mag, vie
     apply_view(plotter, view_name)
 
 
-def render_fiber_views(results, gen, out_dir, run_slug, max_arrows):
+def render_fiber_views(
+    results,
+    gen,
+    out_dir,
+    run_slug,
+    max_arrows,
+    model_names=None,
+):
     pv.OFF_SCREEN = True
+
     fig_dir = out_dir / "figures" / run_slug
     fig_dir.mkdir(parents=True, exist_ok=True)
+
     points = np.asarray(gen.points)
     triangs = np.asarray(gen.triangs)
     centers = points[triangs].mean(axis=1)
+
     mesh = make_mesh(points, triangs)
     truth = np.asarray(gen.D)[:, :, -1]
-    ids = np.arange(0, len(centers), max(1, len(centers) // max_arrows))
-    mag = np.linalg.norm(np.asarray(mesh.bounds)[1::2] - np.asarray(mesh.bounds)[::2]) * 0.011
+
+    step = max(1, len(centers) // max(1, max_arrows))
+    ids = np.arange(0, len(centers), step)
+
+    mag = np.linalg.norm(
+        np.asarray(mesh.bounds)[1::2] - np.asarray(mesh.bounds)[::2]
+    ) * 0.011
+
+    model_colors = {
+        "alpha": "darkorange",
+        "q_alpha": "seagreen",
+        "q_direct": "crimson",
+    }
+
+    if model_names is None:
+        model_names = list(results.keys())
+
+    active_fiber_panels = []
+
+    for name in model_names:
+        if name not in results:
+            continue
+
+        metrics = results[name]
+
+        if "pred_fibers" not in metrics:
+            continue
+
+        color = model_colors.get(name, "blue")
+        active_fiber_panels.append((name, metrics, color))
+
     panels = [("truth", truth, "Ground truth", "black")]
-    panels += [(name, np.asarray(metrics["pred_fibers"]), name, color) for name, metrics, color in [
-        ("alpha", results["alpha"], "darkorange"),
-        ("q_alpha", results["q_alpha"], "seagreen"),
-        ("q_direct", results["q_direct"], "crimson"),
-    ]]
+
+    panels += [
+        (name, np.asarray(metrics["pred_fibers"]), name, color)
+        for name, metrics, color in active_fiber_panels
+    ]
+
+    n_panels = len(panels)
+    n_cols = 2
+    n_rows = int(np.ceil(n_panels / n_cols))
+
     views = ["isometric", "front", "left", "right", "top"]
+
     for view in views:
-        plotter = pv.Plotter(shape=(2, 2), off_screen=True, window_size=(2200, 1700))
+        plotter = pv.Plotter(
+            shape=(n_rows, n_cols),
+            off_screen=True,
+            window_size=(2200, 1700),
+        )
         plotter.set_background("white")
+
         for i, (_, vectors, title, color) in enumerate(panels):
-            plotter.subplot(i // 2, i % 2)
-            add_fiber_panel(plotter, mesh, centers, vectors, ids, title, color, mag, view)
+            plotter.subplot(i // n_cols, i % n_cols)
+            add_fiber_panel(
+                plotter,
+                mesh,
+                centers,
+                vectors,
+                ids,
+                title,
+                color,
+                mag,
+                view,
+            )
+
         plotter.screenshot(fig_dir / f"fiber_field_dense_{view}.png")
         plotter.close()
 
-    for name, metrics, color in [("alpha", results["alpha"], "darkorange"), ("q_alpha", results["q_alpha"], "seagreen"), ("q_direct", results["q_direct"], "crimson")]:
-        plotter = pv.Plotter(shape=(1, 2), off_screen=True, window_size=(1900, 850))
+    for name, metrics, color in active_fiber_panels:
+        plotter = pv.Plotter(
+            shape=(1, 2),
+            off_screen=True,
+            window_size=(1900, 850),
+        )
         plotter.set_background("white")
-        for idx, (title, vectors, c) in enumerate([("Ground truth", truth, "black"), (name, np.asarray(metrics["pred_fibers"]), color)]):
+
+        comparison_panels = [
+            ("Ground truth", truth, "black"),
+            (name, np.asarray(metrics["pred_fibers"]), color),
+        ]
+
+        for idx, (title, vectors, c) in enumerate(comparison_panels):
             plotter.subplot(0, idx)
-            add_fiber_panel(plotter, mesh, centers, vectors, ids, title, c, mag, "isometric")
+            add_fiber_panel(
+                plotter,
+                mesh,
+                centers,
+                vectors,
+                ids,
+                title,
+                c,
+                mag,
+                "isometric",
+            )
+
         plotter.screenshot(fig_dir / f"{name}_dense_isometric.png")
         plotter.close()
-
 
 def render_error_views(results, gen, out_dir, run_slug):
     pv.OFF_SCREEN = True
@@ -234,6 +375,10 @@ def render_error_views(results, gen, out_dir, run_slug):
 
 def render_summary_charts(results, out_dir, run_slug):
     fig_dir = out_dir / "figures" / run_slug
+    fig_dir.mkdir(parents=True, exist_ok=True)
+
+    render_loss_charts(results, fig_dir)
+
     fig, ax = plt.subplots(figsize=(7, 4))
     for name, metrics in results.items():
         ax.hist(metrics["angular_errors"], bins=45, alpha=0.45, label=name)
@@ -260,6 +405,49 @@ def render_summary_charts(results, out_dir, run_slug):
     plt.close(fig)
 
 
+def render_loss_charts(results, fig_dir):
+    available = {
+        name: metrics
+        for name, metrics in results.items()
+        if metrics.get("loss") and metrics.get("loss_epoch")
+    }
+    if not available:
+        print(">> Skipping loss figure because no loss history is available.")
+        return
+
+    fig, axes = plt.subplots(2, 1, figsize=(8, 7), sharex=True)
+    colors = {
+        "alpha": "darkorange",
+        "q_alpha": "seagreen",
+        "q_direct": "crimson",
+    }
+
+    for name, metrics in available.items():
+        epochs = np.asarray(metrics["loss_epoch"], dtype=np.float64)
+        color = colors.get(name)
+        axes[0].semilogy(epochs, metrics["loss"], label=name, color=color)
+        axes[1].semilogy(epochs, metrics["loss_data"], label=f"{name} data", color=color, linestyle="-")
+        axes[1].semilogy(epochs, metrics["loss_pde"], label=f"{name} pde", color=color, linestyle="--")
+        axes[1].semilogy(
+            epochs,
+            metrics["loss_regu_orient"],
+            label=f"{name} orient reg",
+            color=color,
+            linestyle=":",
+        )
+
+    axes[0].set_ylabel("total loss")
+    axes[0].legend()
+    axes[0].grid(alpha=0.25)
+    axes[1].set_xlabel("epoch")
+    axes[1].set_ylabel("loss component")
+    axes[1].legend(ncol=2, fontsize=8)
+    axes[1].grid(alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(fig_dir / "loss_history.png", dpi=220)
+    plt.close(fig)
+
+
 def render_figures(results, gen, out_dir, run_slug, max_arrows):
     render_fiber_views(results, gen, out_dir, run_slug, max_arrows)
     render_error_views(results, gen, out_dir, run_slug)
@@ -267,7 +455,16 @@ def render_figures(results, gen, out_dir, run_slug, max_arrows):
 
 
 def strip_arrays(results):
-    skip = {"loss", "loss_data", "loss_pde", "loss_regu_orient", "angular_errors", "pred_fibers", "truth_fibers"}
+    skip = {
+        "loss",
+        "loss_data",
+        "loss_pde",
+        "loss_regu_orient",
+        "loss_epoch",
+        "angular_errors",
+        "pred_fibers",
+        "truth_fibers",
+    }
     return {model: {k: v for k, v in metrics.items() if k not in skip} for model, metrics in results.items()}
 
 
@@ -292,13 +489,23 @@ def experiment_dir(args, cfg):
 
 
 def metrics_without_arrays(metrics):
-    skip = {"pred_fibers", "truth_fibers", "angular_errors", "loss", "loss_data", "loss_pde", "loss_regu_orient"}
+    skip = {
+        "pred_fibers",
+        "truth_fibers",
+        "angular_errors",
+        "loss",
+        "loss_data",
+        "loss_pde",
+        "loss_regu_orient",
+        "loss_epoch",
+    }
     return {k: v for k, v in metrics.items() if k not in skip}
 
 
 def load_model_result(model_dir):
     metrics_path = model_dir / "metrics.json"
     reconstruction_path = model_dir / "reconstruction.npz"
+    loss_history_path = model_dir / "loss_history.npz"
     if not metrics_path.exists() or not reconstruction_path.exists():
         return None
 
@@ -308,7 +515,19 @@ def load_model_result(model_dir):
     metrics["pred_fibers"] = arrays["pred_fibers"].tolist()
     metrics["truth_fibers"] = arrays["truth_fibers"].tolist()
     metrics["angular_errors"] = arrays["angular_errors"].tolist()
+    if loss_history_path.exists():
+        loss_arrays = np.load(loss_history_path)
+        for key in LOSS_KEYS:
+            if key in loss_arrays:
+                metrics[key] = loss_arrays[key].tolist()
     return metrics
+
+
+def save_loss_history(model_dir, metrics):
+    available = {key: np.asarray(metrics[key], dtype=np.float64) for key in LOSS_KEYS if key in metrics}
+    if not available:
+        return
+    np.savez_compressed(model_dir / "loss_history.npz", **available)
 
 
 def load_available_results(out_dir):
@@ -331,6 +550,10 @@ def main():
     parser.add_argument("--render-figures", action="store_true")
     parser.add_argument("--model", choices=MODELS.keys(), required=True)
     parser.add_argument("--run-label", default="")
+    parser.add_argument("--log-every", type=int, default=1)
+    parser.add_argument("--checkpoint-dir", type=Path, default=None)
+    parser.add_argument("--checkpoint-every", type=int, default=1000)
+    parser.add_argument("--no-resume", action="store_true")
     args = parser.parse_args()
 
     out_dir = experiment_dir(args, high_density_config(args.n_iter, args.lambda_tva, args.density, args.learning_rate))
@@ -370,19 +593,50 @@ def main():
     model_name = args.model
     model_cls = MODELS[model_name]
     print(f"Training {model_name} with density={args.density}")
-    handler = ExperimentHandler(model_cls, cfg, gen)
+    model_dir = out_dir / model_name
+    model_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir = args.checkpoint_dir or (model_dir / "checkpoints")
+
+    handler = ExperimentHandler(model_cls, cfg, gen, log_every=args.log_every)
+    resumed_from = None
+    completed_before_training = 0
+    if args.no_resume:
+        print(">> Resume disabled; starting from a fresh model.")
+    else:
+        resumed_from = handler.load_checkpoint(checkpoint_dir)
+        if resumed_from is None:
+            print(f">> No checkpoint found in {checkpoint_dir}; starting from a fresh model.")
+        else:
+            completed_before_training = int(resumed_from["completed_iter"])
+            print(
+                f">> Resuming from checkpoint {resumed_from['path']} "
+                f"at iter {completed_before_training}."
+            )
+
+    remaining_iter = max(0, args.n_iter - completed_before_training)
     train_start = time.perf_counter()
-    handler.train(args.n_iter)
+    completed_iter = handler.train(
+        remaining_iter,
+        checkpoint_dir=checkpoint_dir,
+        checkpoint_every=args.checkpoint_every,
+        start_iter=completed_before_training,
+    )
     train_time_seconds = time.perf_counter() - train_start
+    if completed_iter >= args.n_iter:
+        handler.save_checkpoint(checkpoint_dir, completed_iter)
+
     metrics = metrics_from_run(handler, truth_fibers)
     metrics["train_time_seconds"] = float(train_time_seconds)
     metrics["train_time_minutes"] = float(train_time_seconds / 60.0)
-
-    model_dir = out_dir / model_name
-    model_dir.mkdir(parents=True, exist_ok=True)
+    metrics["train_iters_requested"] = int(args.n_iter)
+    metrics["train_iters_completed"] = int(completed_iter)
+    metrics["checkpoint_dir"] = str(checkpoint_dir)
+    metrics["checkpoint_resumed"] = resumed_from is not None
+    metrics["checkpoint_resumed_from_iter"] = int(completed_before_training)
 
     with open(model_dir / "metrics.json", "w") as f:
         json.dump(metrics_without_arrays(metrics), f, indent=2)
+    save_loss_history(model_dir, metrics)
     np.savez_compressed(
         model_dir / "reconstruction.npz",
         pred_fibers=np.asarray(metrics["pred_fibers"]),
@@ -396,7 +650,7 @@ def main():
     with open(out_dir / "summary.json", "w") as f:
         json.dump(strip_arrays(results), f, indent=2)
 
-    if args.render_figures and set(results) == set(MODELS):
+    if args.render_figures:
         render_figures(results, gen, out_dir, "comparison", args.max_arrows)
     else:
         print(">> Skipping figures. Use --render-figures to create them.")
