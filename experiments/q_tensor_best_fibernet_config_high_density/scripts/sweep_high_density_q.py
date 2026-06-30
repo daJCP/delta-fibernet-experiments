@@ -22,10 +22,10 @@ SWEEP_PRESETS = {
     },
     "broad": {
         "densities": [8, 16, 24, 32],
-        "lambda_tvas": [0.0, 1e-11, 1e-9, 1e-6, 1e-5],
-        "learning_rates": [1e-3, 5e-4, 1e-4],
+        "lambda_tvas": [0.0, 1e-11, 1e-9, 1e-5],
+        "learning_rates": [1e-3],
         "models": ["alpha", "q_alpha", "q_direct"],
-        "n_iter": 30000,
+        "n_iter": [200000],
     },
 }
 
