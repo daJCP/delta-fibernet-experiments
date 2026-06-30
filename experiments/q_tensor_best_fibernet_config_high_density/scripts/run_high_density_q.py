@@ -93,7 +93,10 @@ class ExperimentHandler:
 
     def load_checkpoint(self, checkpoint_dir):
         checkpoint_dir = Path(checkpoint_dir)
-        latest_path = checkpoint_dir / "latest.pkl"
+        return self.load_checkpoint_path(checkpoint_dir / "latest.pkl")
+
+    def load_checkpoint_path(self, latest_path):
+        latest_path = Path(latest_path)
         if not latest_path.exists():
             return None
 
@@ -104,6 +107,8 @@ class ExperimentHandler:
         self.model.opt_state = jx.device_put(payload["opt_state"])
         self.model.net_params = self.model.get_params(self.model.opt_state)
         self.model.training_log = payload.get("training_log", self.model.training_log)
+        self.log_every = int(payload.get("log_every", self.log_every))
+        self.model.io_step = self.log_every
         self.model.itercount = itertools.count(completed_iter)
         return {"path": str(latest_path), "completed_iter": completed_iter}
 
@@ -488,6 +493,85 @@ def experiment_dir(args, cfg):
     return path
 
 
+def checkpoint_iter(checkpoint_path):
+    checkpoint_path = Path(checkpoint_path)
+    if not checkpoint_path.exists():
+        return None
+
+    try:
+        with open(checkpoint_path, "rb") as f:
+            payload = pickle.load(f)
+    except Exception as exc:
+        print(f">> Ignoring unreadable checkpoint {checkpoint_path}: {exc}")
+        return None
+
+    return int(payload.get("completed_iter", 0))
+
+
+def compatible_checkpoint_candidates(args, cfg, model_name):
+    root = (
+        EXP_DIR
+        / "results"
+        / f"density{args.density}"
+        / f"lambda_tva{slug_value(args.lambda_tva)}"
+        / f"lr{slug_value(args.learning_rate)}"
+    )
+    if not root.exists():
+        return []
+
+    candidates = []
+    safe_label = args.run_label.replace("/", "_").replace(" ", "_") if args.run_label else ""
+
+    for niter_dir in root.glob("niter*"):
+        if not niter_dir.is_dir():
+            continue
+        try:
+            n_iter = int(niter_dir.name.removeprefix("niter"))
+        except ValueError:
+            continue
+        if n_iter > args.n_iter:
+            continue
+
+        checkpoint_path = niter_dir / f"batch{cfg['batch_size']}"
+        if safe_label:
+            checkpoint_path = checkpoint_path / safe_label
+        checkpoint_path = checkpoint_path / model_name / "checkpoints" / "latest.pkl"
+        completed_iter = checkpoint_iter(checkpoint_path)
+        if completed_iter is None:
+            continue
+        if completed_iter > args.n_iter:
+            continue
+        candidates.append(
+            {
+                "path": checkpoint_path,
+                "completed_iter": completed_iter,
+                "partition_n_iter": n_iter,
+            }
+        )
+
+    return sorted(
+        candidates,
+        key=lambda item: (item["completed_iter"], item["partition_n_iter"]),
+        reverse=True,
+    )
+
+
+def best_checkpoint_candidate(args, cfg, model_name, checkpoint_dir):
+    if args.checkpoint_dir:
+        exact_path = Path(checkpoint_dir) / "latest.pkl"
+        completed_iter = checkpoint_iter(exact_path)
+        if completed_iter is None or completed_iter > args.n_iter:
+            return None
+        return {
+            "path": exact_path,
+            "completed_iter": completed_iter,
+            "partition_n_iter": args.n_iter,
+        }
+
+    candidates = compatible_checkpoint_candidates(args, cfg, model_name)
+    return candidates[0] if candidates else None
+
+
 def metrics_without_arrays(metrics):
     skip = {
         "pred_fibers",
@@ -603,14 +687,19 @@ def main():
     if args.no_resume:
         print(">> Resume disabled; starting from a fresh model.")
     else:
-        resumed_from = handler.load_checkpoint(checkpoint_dir)
-        if resumed_from is None:
-            print(f">> No checkpoint found in {checkpoint_dir}; starting from a fresh model.")
+        checkpoint_candidate = best_checkpoint_candidate(args, cfg, model_name, checkpoint_dir)
+        if checkpoint_candidate is None:
+            print(
+                ">> No compatible checkpoint found for this configuration "
+                f"up to n_iter={args.n_iter}; starting from a fresh model."
+            )
         else:
+            resumed_from = handler.load_checkpoint_path(checkpoint_candidate["path"])
             completed_before_training = int(resumed_from["completed_iter"])
             print(
-                f">> Resuming from checkpoint {resumed_from['path']} "
-                f"at iter {completed_before_training}."
+                f">> Resuming from checkpoint {resumed_from['path']} at iter "
+                f"{completed_before_training} from niter"
+                f"{checkpoint_candidate['partition_n_iter']} partition."
             )
 
     remaining_iter = max(0, args.n_iter - completed_before_training)
