@@ -42,6 +42,7 @@ MODELS = {
 }
 
 LOSS_KEYS = ("loss", "loss_data", "loss_pde", "loss_regu_orient", "loss_epoch")
+LOSS_PLOT_BIN_SIZE = 100
 
 class ExperimentHandler:
     def __init__(self, model_cls, params, gen, log_every=1):
@@ -429,13 +430,27 @@ def render_loss_charts(results, fig_dir):
 
     for name, metrics in available.items():
         epochs = np.asarray(metrics["loss_epoch"], dtype=np.float64)
+        total_loss = np.asarray(metrics["loss"], dtype=np.float64)
+        loss_data = np.asarray(metrics["loss_data"], dtype=np.float64)
+        loss_pde = np.asarray(metrics["loss_pde"], dtype=np.float64)
+        loss_regu_orient = np.asarray(metrics["loss_regu_orient"], dtype=np.float64)
         color = colors.get(name)
-        axes[0].semilogy(epochs, metrics["loss"], label=name, color=color)
-        axes[1].semilogy(epochs, metrics["loss_data"], label=f"{name} data", color=color, linestyle="-")
-        axes[1].semilogy(epochs, metrics["loss_pde"], label=f"{name} pde", color=color, linestyle="--")
-        axes[1].semilogy(
+
+        epochs_total, total_loss = downsample_loss_curve(epochs, total_loss, LOSS_PLOT_BIN_SIZE)
+        epochs_data, loss_data = downsample_loss_curve(epochs, loss_data, LOSS_PLOT_BIN_SIZE)
+        epochs_pde, loss_pde = downsample_loss_curve(epochs, loss_pde, LOSS_PLOT_BIN_SIZE)
+        epochs_regu, loss_regu_orient = downsample_loss_curve(
             epochs,
-            metrics["loss_regu_orient"],
+            loss_regu_orient,
+            LOSS_PLOT_BIN_SIZE,
+        )
+
+        axes[0].semilogy(epochs_total, total_loss, label=name, color=color)
+        axes[1].semilogy(epochs_data, loss_data, label=f"{name} data", color=color, linestyle="-")
+        axes[1].semilogy(epochs_pde, loss_pde, label=f"{name} pde", color=color, linestyle="--")
+        axes[1].semilogy(
+            epochs_regu,
+            loss_regu_orient,
             label=f"{name} orient reg",
             color=color,
             linestyle=":",
@@ -451,6 +466,19 @@ def render_loss_charts(results, fig_dir):
     fig.tight_layout()
     fig.savefig(fig_dir / "loss_history.png", dpi=220)
     plt.close(fig)
+
+
+def downsample_loss_curve(epochs, values, bin_size):
+    if bin_size <= 1 or len(values) <= bin_size:
+        return epochs, values
+
+    epochs_out = []
+    values_out = []
+    for start in range(0, len(values), bin_size):
+        end = min(start + bin_size, len(values))
+        epochs_out.append(float(np.mean(epochs[start:end])))
+        values_out.append(float(np.mean(values[start:end])))
+    return np.asarray(epochs_out), np.asarray(values_out)
 
 
 def render_figures(results, gen, out_dir, run_slug, max_arrows):
