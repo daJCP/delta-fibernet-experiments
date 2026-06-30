@@ -95,6 +95,8 @@ Para aislar el efecto de la GPU, se repitio `density=16` con JAX Metal. `alpha` 
 
 ## Graficos Resumen
 
+![Evolucion de la perdida por epoca](results/density24/lambda_tva1em09/lr0p001/niter30000/batch32/figures/comparison/loss_history.png){width=90%}
+
 ![Media y mediana de error angular](figures/lambda1e-9_density24_best5/angular_error_bars.png){width=80%}
 
 ![Histograma de error angular](figures/lambda1e-9_density24_best5/angular_error_histogram.png){width=80%}
