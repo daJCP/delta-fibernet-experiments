@@ -4,17 +4,13 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from prepare_high_density_data import EXP_DIR, default_cache_path
-from run_high_density_q import MODELS, experiment_dir, high_density_config
-
-
 SWEEP_PRESETS = {
     "smoke": {
-        "densities": [16],
+        "densities": [256*2],
         "lambda_tvas": [1e-9],
         "learning_rates": [1e-3],
         "models": ["alpha", "q_alpha", "q_direct"],
-        "n_iter": 1,
+        "n_iter": 30000,
     },
     "focused": {
         "densities": [16, 24],
@@ -32,8 +28,14 @@ SWEEP_PRESETS = {
     },
 }
 
+from prepare_high_density_data import EXP_DIR, default_cache_path
+from run_high_density_q import MODELS, experiment_dir, high_density_config
+
+
+
+
 DEFAULT_PRESET = "focused"
-DEFAULT_MAX_WORKERS = 1
+DEFAULT_MAX_WORKERS = 2
 DEFAULT_RUN_LABEL = ""
 
 
@@ -101,6 +103,9 @@ def run_job(job, render_figures=False, force=False):
         str(n_iter),
         "--data-cache",
         str(default_cache_path(density)),
+        "--max-arrows",
+        "10000", 
+        "--render-figures"
     ]
     if run_label:
         cmd += ["--run-label", run_label]
