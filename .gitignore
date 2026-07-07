@@ -2,6 +2,7 @@ Fibernet2/__pycache__/*
 Fibernet2/generators/__pycache__/*
 jaxpinns/__pycache__/*
 .venv/
+experiments/**/results/
 experiments/q_tensor_best_fibernet_config_high_density/results/
 experiments/q_tensor_best_fibernet_config_high_density/figures/
 experiments/q_tensor_best_fibernet_config_high_density/data/
