@@ -7,11 +7,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 SWEEP_PRESETS = {
     "smoke": {
-        "densities": [256*2],
+        "densities": [16],
         "lambda_tvas": [1e-9],
         "learning_rates": [1e-3],
         "models": ["alpha", "q_alpha", "q_direct"],
-        "n_iter": [100, 1000],
+        "n_iter": [300000],
     },
     "focused": {
         "densities": [16, 24],
@@ -21,11 +21,11 @@ SWEEP_PRESETS = {
         "n_iter": 30000,
     },
     "broad": {
-        "densities": [8, 16, 24, 32],
+        "densities": [32],
         "lambda_tvas": [0.0, 1e-11, 1e-9, 1e-5],
         "learning_rates": [1e-3],
         "models": ["alpha", "q_alpha", "q_direct"],
-        "n_iter": [200000],
+        "n_iter": [50000,100000,150000,200000],
     },
 }
 
@@ -179,7 +179,7 @@ def run_job(
     render_figures=False,
     force=False,
     log_every=1,
-    checkpoint_every=1000,
+    checkpoint_every=400000,
     no_resume=False,
 ):
     density, lambda_tva, learning_rate, n_iter, model_name, run_label = job
@@ -250,8 +250,8 @@ def main():
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--force-data", action="store_true")
     parser.add_argument("--render-figures", action="store_true")
-    parser.add_argument("--log-every", type=int, default=1)
-    parser.add_argument("--checkpoint-every", type=int, default=1000)
+    parser.add_argument("--log-every", type=int, default=100)
+    parser.add_argument("--checkpoint-every", type=int, default=400000)
     parser.add_argument("--no-resume", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
